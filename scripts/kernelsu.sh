@@ -115,6 +115,9 @@ ksu_install() {
 		warn "Pin KSU_REF (e.g. a tag) if you need reproducible builds."
 	fi
 
+	# haydn/AGNi trees ship a built-in KSU (SukiSU) at drivers/kernelsu;
+	# remove it so setup.sh can create a fresh symlink for the chosen variant.
+	rm -rf "${KERNEL_DIR}/drivers/kernelsu"
 	# Run the variant's own installer.
 	local setup_url="https://raw.githubusercontent.com/${repo#https://github.com/}/${setup_ref}/kernel/setup.sh"
 	info "running ${setup_url}"
