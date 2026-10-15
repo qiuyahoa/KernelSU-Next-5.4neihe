@@ -117,6 +117,27 @@ ksu_install() {
 
 	# haydn/AGNi trees ship a built-in KSU (SukiSU) at drivers/kernelsu;
 	# remove it so setup.sh can create a fresh symlink for the chosen variant.
+	# Those trees integrate SUSFS kernel-side (fs/susfs.c, hooks in exec/stat/
+	# read_write/input/reboot/pty/sys), and the KSU_SUSFS Kconfig menu lives
+	# inside the built-in variant's own Kconfig. Deleting the variant without
+	# rescuing it would silently strip every CONFIG_KSU_SUSFS_* symbol out of
+	# Kconfig: the #ifdef CONFIG_KSU_SUSFS hooks compile out and the link dies
+	# on the missing static keys (run5: undefined ksu_init_rc_hook_key_false).
+	local built_in_kconfig="${KERNEL_DIR}/drivers/kernelsu/Kconfig"
+	local susfs_menu="${WORKSPACE:-/tmp}/susfs_kconfig_menu.txt"
+	rm -f "$susfs_menu"
+	if [ -f "$built_in_kconfig" ]; then
+		awk '/^menu "KernelSU - SUSFS"/{f=1} f{print} f&&/^endmenu/{exit}' \
+			"$built_in_kconfig" > "$susfs_menu" || true
+		if [ -s "$susfs_menu" ]; then
+			ok "rescued the SUSFS Kconfig menu from the built-in variant ($(wc -l < "$susfs_menu") lines)"
+		fi
+	fi
+	if [ ! -s "$susfs_menu" ] && [ -f "${KERNEL_DIR}/fs/susfs.c" ]; then
+		die "the tree ships SUSFS kernel-side (fs/susfs.c) but its built-in KSU
+       variant carried no 'KernelSU - SUSFS' Kconfig menu to rescue. Installing
+       a replacement variant now would silently disable SUSFS."
+	fi
 	rm -rf "${KERNEL_DIR}/drivers/kernelsu"
 	# Run the variant's own installer.
 	local setup_url="https://raw.githubusercontent.com/${repo#https://github.com/}/${setup_ref}/kernel/setup.sh"
@@ -170,6 +191,94 @@ ksu_install() {
 		fi
 	fi
 	ok "${name} installed at ${head_desc} (${head_sha})"
+
+	# --- SUSFS bridging for trees whose built-in variant carried SUSFS -----
+	#
+	# Re-attach the rescued Kconfig menu, drop in the compat shims for the
+	# symbols the kernel-side SUSFS hooks expect from the KSU variant, and
+	# expose KSUN's static try_umount() to fs/susfs.c. Only done when the
+	# replacement variant does not declare SUSFS itself (SukiSU builtin does).
+	local ksu_kernel_dir="${ksu_dir}/kernel"
+	if [ -s "$susfs_menu" ] && ! grep -q 'config KSU_SUSFS' "${ksu_kernel_dir}/Kconfig" 2>/dev/null; then
+		info "bridging kernel-side SUSFS to ${name}"
+		printf '\n# SUSFS options rescued from the tree'"'"'s built-in KSU variant\n' \
+			>> "${ksu_kernel_dir}/Kconfig"
+		cat "$susfs_menu" >> "${ksu_kernel_dir}/Kconfig"
+		grep -q 'config KSU_SUSFS' "${ksu_kernel_dir}/Kconfig" \
+			|| die "SUSFS Kconfig menu was re-attached but no KSU_SUSFS symbol is visible"
+
+		# Compat shims: the AGNi kernel-side hooks call three symbols SukiSU
+		# used to provide that KSUN v3.4.0-legacy does not (verified against
+		# both sources). Everything else resolves natively.
+		if [ ! -f "${ksu_kernel_dir}/agni_compat.c" ]; then
+			cat > "${ksu_kernel_dir}/agni_compat.c" <<'AGNI_COMPAT_EOF'
+/*
+ * AGNi <-> KernelSU-Next compatibility shims.
+ *
+ * Trees like AGNi (SukiSU-Ultra builtin) integrate SUSFS kernel-side and
+ * their syscall hooks reference a handful of symbols the KSU variant was
+ * expected to provide. KernelSU-Next v3.4.0-legacy provides almost all of
+ * them; this file supplies the few it does not.
+ */
+#include <linux/fs.h>
+#include <linux/init.h>
+#include <linux/types.h>
+
+#include "selinux/selinux.h"
+
+/*
+ * drivers/tty/pty.c (CONFIG_KSU): devpts open notifier. KernelSU-Next
+ * covers devpts through its own LSM hooks instead; keep the call site
+ * happy with a no-op.
+ */
+int ksu_handle_devpts(struct inode *inode)
+{
+	return 0;
+}
+
+/*
+ * fs/exec.c and fs/stat.c: SukiSU's st_size report hook used for init.rc
+ * injection. KernelSU-Next handles that via ksu_handle_sys_read(); there
+ * is nothing for this hook to do.
+ */
+void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr)
+{
+}
+
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs.h>
+
+/* fs/susfs.c asks whether the current task is in the KSU SELinux domain;
+ * delegate to KernelSU-Next's own check. */
+bool susfs_is_current_ksu_domain(void)
+{
+	return is_ksu_domain();
+}
+
+/* SukiSU used to call susfs_init() during its own initialization. Without
+ * it the SUSFS static keys never enable and every kernel-side SUSFS hook
+ * stays dormant, so trigger it from a late initcall. */
+static int __init agni_ksu_susfs_late_init(void)
+{
+	susfs_init();
+	return 0;
+}
+late_initcall(agni_ksu_susfs_late_init);
+#endif /* CONFIG_KSU_SUSFS */
+AGNI_COMPAT_EOF
+		fi
+		grep -q 'agni_compat' "${ksu_kernel_dir}/Kbuild" \
+			|| printf 'kernelsu-objs += agni_compat.o\n' >> "${ksu_kernel_dir}/Kbuild"
+
+		# fs/susfs.c (CONFIG_KSU_SUSFS_TRY_UMOUNT) calls try_umount() via a
+		# plain extern; KSUN's implementation is static in kernel_umount.c.
+		# Un-static it so the symbol is visible at link time.
+		local umount_c="${ksu_kernel_dir}/feature/kernel_umount.c"
+		if [ -f "$umount_c" ] && grep -q '^static void try_umount(' "$umount_c"; then
+			sed -i 's/^static void try_umount(/void try_umount(/' "$umount_c"
+			ok "exposed KSUN's static try_umount() to fs/susfs.c"
+		fi
+	fi
 
 	# --- publish facts the later steps need --------------------------------
 	local count version_label
