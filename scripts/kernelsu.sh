@@ -85,6 +85,21 @@ ksu_install() {
 	group "Installing ${name}"
 	info "repository: ${repo}"
 
+	# Cap the reported kernel version: AGNi tracks the 5.4 LTS tip
+	# (SUBLEVEL=302) but detection surfaces expect <= 5.4.256. Rewrite it
+	# before anything reads the version (vermagic, utsrelease, kver below).
+	# Idempotent: only fires when SUBLEVEL actually exceeds the cap.
+	if [ -f "${KERNEL_DIR}/Makefile" ]; then
+		local sublevel
+		sublevel=$(sed -n 's/^SUBLEVEL = //p' "${KERNEL_DIR}/Makefile" | head -n1)
+		if [ -n "$sublevel" ] && [ "$sublevel" -gt 256 ]; then
+			sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 256/' "${KERNEL_DIR}/Makefile"
+			ok "kernel SUBLEVEL capped: 5.4.${sublevel} -> 5.4.256"
+		else
+			ok "kernel SUBLEVEL already <= cap (5.4.${sublevel:-?})"
+		fi
+	fi
+
 	# Decide which ref to check out.
 	local kver ref=$requested_ref
 	kver=$(kernel_version "$KERNEL_DIR" || echo "0.0")
