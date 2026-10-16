@@ -85,26 +85,31 @@ ksu_install() {
 	group "Installing ${name}"
 	info "repository: ${repo}"
 
-	# Spoof the kernel release to the stock MIUI 14.0.8 (haydn) string so
-	# detection surfaces see a stock version. Stock string, extracted from
-	# the user's original boot_a backup:
+	# Spoof the *displayed* kernel release to the stock MIUI 14.0.8 (haydn)
+	# string, extracted from the user's original boot_a backup:
 	#   5.4.233-qgki-gbb70cde46897
-	# AGNi tracks the 5.4 LTS tip (5.4.302) with a custom LOCALVERSION.
-	# Two rewrites before anything reads the version:
-	#   1. Makefile SUBLEVEL 302 -> 233 (affects vermagic/utsrelease/kver)
-	#   2. defconfig CONFIG_LOCALVERSION -> stock suffix (drops the -AGNi tag)
-	# Do NOT make this a partial "cap": partial spoofing (5.4.256) still
-	# identifies as non-stock.
+	#
+	# IMPORTANT: do NOT touch Makefile SUBLEVEL. The tree is real 5.4.302
+	# code; every LINUX_VERSION_CODE guard in the tree's compat layers is
+	# written against the real version (run10: rewriting SUBLEVEL to 233
+	# flipped drivers/net/usb/compatibility.h into defining
+	# eth_hw_addr_set that the 5.4.y tip already ships -> redefinition
+	# error). So keep all version macros at their true values and spoof
+	# only the one thing userspace sees: UTS_RELEASE. The top-level
+	# Makefile folds $(KERNELRELEASE) into UTS_RELEASE right here, so pin
+	# the else-branch assignment to the stock string. vermagic, uname -r
+	# and /proc/version all come from UTS_RELEASE.
 	local sublevel
 	sublevel=$(sed -n 's/^SUBLEVEL = //p' "${KERNEL_DIR}/Makefile" | head -n1)
-	if [ "$sublevel" != "233" ]; then
-		sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 233/' "${KERNEL_DIR}/Makefile"
-		ok "kernel SUBLEVEL spoofed: 5.4.${sublevel:-?} -> 5.4.233 (stock MIUI 14.0.8)"
-	else
-		ok "kernel SUBLEVEL already stock (5.4.233)"
-	fi
+	ok "kernel SUBLEVEL kept real (5.4.${sublevel:-?}); only UTS_RELEASE is spoofed"
 
-	local defcfg="${KERNEL_DIR}/arch/arm64/configs/${KERNEL_CONFIG:-agni_haydn_defconfig}"
+	sed -i 's|^\tUTS_RELEASE=\$(KERNELRELEASE)$|\tUTS_RELEASE=5.4.233-qgki-gbb70cde46897|' \
+		"${KERNEL_DIR}/Makefile"
+	grep -q 'UTS_RELEASE=5.4.233-qgki-gbb70cde46897' "${KERNEL_DIR}/Makefile" \
+		|| die "UTS_RELEASE spoof: expected 'UTS_RELEASE=\$(KERNELRELEASE)' line not found in top Makefile"
+	ok "UTS_RELEASE pinned to stock string 5.4.233-qgki-gbb70cde46897"
+
+	local defcfg="${KERNEL_DIR}/arch/${ARCH:-arm64}/configs/${KERNEL_CONFIG:-agni_haydn_defconfig}"
 	if [ -f "$defcfg" ] && grep -q '^CONFIG_LOCALVERSION=' "$defcfg"; then
 		if ! grep -q 'CONFIG_LOCALVERSION="-qgki-gbb70cde46897"' "$defcfg"; then
 			sed -i 's|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION="-qgki-gbb70cde46897"|' "$defcfg"
