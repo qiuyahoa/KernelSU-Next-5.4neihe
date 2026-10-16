@@ -85,19 +85,35 @@ ksu_install() {
 	group "Installing ${name}"
 	info "repository: ${repo}"
 
-	# Cap the reported kernel version: AGNi tracks the 5.4 LTS tip
-	# (SUBLEVEL=302) but detection surfaces expect <= 5.4.256. Rewrite it
-	# before anything reads the version (vermagic, utsrelease, kver below).
-	# Idempotent: only fires when SUBLEVEL actually exceeds the cap.
-	if [ -f "${KERNEL_DIR}/Makefile" ]; then
-		local sublevel
-		sublevel=$(sed -n 's/^SUBLEVEL = //p' "${KERNEL_DIR}/Makefile" | head -n1)
-		if [ -n "$sublevel" ] && [ "$sublevel" -gt 256 ]; then
-			sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 256/' "${KERNEL_DIR}/Makefile"
-			ok "kernel SUBLEVEL capped: 5.4.${sublevel} -> 5.4.256"
+	# Spoof the kernel release to the stock MIUI 14.0.8 (haydn) string so
+	# detection surfaces see a stock version. Stock string, extracted from
+	# the user's original boot_a backup:
+	#   5.4.233-qgki-gbb70cde46897
+	# AGNi tracks the 5.4 LTS tip (5.4.302) with a custom LOCALVERSION.
+	# Two rewrites before anything reads the version:
+	#   1. Makefile SUBLEVEL 302 -> 233 (affects vermagic/utsrelease/kver)
+	#   2. defconfig CONFIG_LOCALVERSION -> stock suffix (drops the -AGNi tag)
+	# Do NOT make this a partial "cap": partial spoofing (5.4.256) still
+	# identifies as non-stock.
+	local sublevel
+	sublevel=$(sed -n 's/^SUBLEVEL = //p' "${KERNEL_DIR}/Makefile" | head -n1)
+	if [ "$sublevel" != "233" ]; then
+		sed -i 's/^SUBLEVEL = .*/SUBLEVEL = 233/' "${KERNEL_DIR}/Makefile"
+		ok "kernel SUBLEVEL spoofed: 5.4.${sublevel:-?} -> 5.4.233 (stock MIUI 14.0.8)"
+	else
+		ok "kernel SUBLEVEL already stock (5.4.233)"
+	fi
+
+	local defcfg="${KERNEL_DIR}/arch/arm64/configs/${KERNEL_CONFIG:-agni_haydn_defconfig}"
+	if [ -f "$defcfg" ] && grep -q '^CONFIG_LOCALVERSION=' "$defcfg"; then
+		if ! grep -q 'CONFIG_LOCALVERSION="-qgki-gbb70cde46897"' "$defcfg"; then
+			sed -i 's|^CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION="-qgki-gbb70cde46897"|' "$defcfg"
+			ok "CONFIG_LOCALVERSION spoofed to stock suffix (-qgki-gbb70cde46897)"
 		else
-			ok "kernel SUBLEVEL already <= cap (5.4.${sublevel:-?})"
+			ok "CONFIG_LOCALVERSION already stock"
 		fi
+	else
+		warn "defconfig ${defcfg} not found or lacks CONFIG_LOCALVERSION; version suffix untouched"
 	fi
 
 	# Decide which ref to check out.
@@ -292,6 +308,20 @@ AGNI_COMPAT_EOF
 		if [ -f "$umount_c" ] && grep -q '^static void try_umount(' "$umount_c"; then
 			sed -i 's/^static void try_umount(/void try_umount(/' "$umount_c"
 			ok "exposed KSUN's static try_umount() to fs/susfs.c"
+		fi
+	fi
+
+	# Keep the release string free of "-dirty": this script has now touched
+	# tracked files (Makefile, defconfig) and dropped untracked ones into the
+	# tree. scripts/setlocalversion appends -dirty when `git diff-index HEAD`
+	# is non-quiet, which would give the spoof away. Commit everything so the
+	# worktree is clean again.
+	if git -C "$KERNEL_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+		if ! git -C "$KERNEL_DIR" diff-index --quiet HEAD 2>/dev/null; then
+			git -C "$KERNEL_DIR" add -A
+			git -C "$KERNEL_DIR" -c user.email=ci@local \
+				-c user.name=ci commit -qm "spoof kernel release to stock MIUI 14.0.8 string"
+			ok "committed tree changes (KERNELRELEASE stays -dirty-free)"
 		fi
 	fi
 
