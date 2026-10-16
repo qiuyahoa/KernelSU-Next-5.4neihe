@@ -11,6 +11,16 @@ set -euo pipefail
 
 KERNEL_DIR=${KERNEL_DIR:?KERNEL_DIR must be set}
 WORKSPACE=${WORKSPACE:-$(cd "${KERNEL_DIR}/.." && pwd)}
+
+# Rewrite hardcoded /home/runner/work/<repo>/<repo>/kernel_workspace paths in
+# EXTRA_CMDS to the actual workspace. The config.env value was written for a
+# previous repo name (KernelSU_Action); a GitHub rename changes the runner
+# path and any stale absolute prefix breaks the vdso32 toolchain (run9:
+# arm-linux-androideabi-ld not found, Error 127). Dynamic rewrite survives
+# future renames as long as the Actions checkout layout stays standard.
+if [ -n "${EXTRA_CMDS:-}" ]; then
+	EXTRA_CMDS=$(printf '%s' "$EXTRA_CMDS" | sed "s|/home/runner/work/[^ ]*/kernel_workspace|$WORKSPACE|g")
+fi
 ARCH=${ARCH:-arm64}
 OUT="${KERNEL_DIR}/out"
 
