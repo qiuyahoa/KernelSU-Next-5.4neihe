@@ -121,6 +121,25 @@ ksu_install() {
 		warn "defconfig ${defcfg} not found or lacks CONFIG_LOCALVERSION; version suffix untouched"
 	fi
 
+	# Disable the pstore console so ramoops records survive a crash. With
+	# CONFIG_PSTORE_CONSOLE=y every printk streams into the ramoops buffer
+	# concurrently; on a hard reset (watchdog bark after a silent deadlock,
+	# which is exactly what the root-detector reboots look like) the record
+	# header is caught half-written and the next boot discards it
+	# ("found existing invalid buffer"). With the console off, ramoops is
+	# written once by the panic handler and stays consistent.
+	if [ -f "$defcfg" ]; then
+		if grep -q '^CONFIG_PSTORE_CONSOLE=y' "$defcfg"; then
+			sed -i 's/^CONFIG_PSTORE_CONSOLE=y/# CONFIG_PSTORE_CONSOLE is not set/' "$defcfg"
+			ok "CONFIG_PSTORE_CONSOLE disabled: panic records will survive reboots"
+		elif grep -q 'CONFIG_PSTORE_CONSOLE is not set' "$defcfg"; then
+			ok "CONFIG_PSTORE_CONSOLE already disabled"
+		else
+			printf '# CONFIG_PSTORE_CONSOLE is not set\n' >> "$defcfg"
+			ok "CONFIG_PSTORE_CONSOLE disabled (appended; was implicit y)"
+		fi
+	fi
+
 	# Decide which ref to check out.
 	local kver ref=$requested_ref
 	kver=$(kernel_version "$KERNEL_DIR" || echo "0.0")
