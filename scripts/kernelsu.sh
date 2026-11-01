@@ -268,7 +268,12 @@ ksu_install() {
 	# i.e. from a *different* translation unit, so the symbol has to be
 	# externally visible or the final vmlinux link fails with
 	# "undefined reference to ksu_handle_faccessat".
-	if [ "$name" = "backslashxx" ]; then
+	# Compare against $variant (registry key), not $name: $name is field 7 of the
+	# registry, i.e. "backslashxx KernelSU", so an equality test against
+	# "backslashxx" never matches and the branch silently falls through to the
+	# KernelSU-Next shim below -- which is exactly how run15 linked with
+	# "undefined symbol: ksu_handle_faccessat" from fs/open.c:371.
+	if [ "$variant" = "backslashxx" ]; then
 		info "adapting ${name} to the tree's in-source KSU call sites"
 
 		local sucompat_c="${ksu_kernel_dir}/feature/sucompat.c"
