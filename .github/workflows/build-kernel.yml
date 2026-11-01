@@ -1,6 +1,16 @@
 name: Build Kernel
 
 on:
+  # Push trigger: this repository is driven from a harness that has no way to
+  # call workflow_dispatch (no gh CLI, no PAT). Pushing the scripts plus
+  # config.env is the trigger. Pull requests only run the CI lint workflow.
+  push:
+    paths:
+      - "scripts/**"
+      - "patches/**"
+      - ".github/workflows/build-kernel.yml"
+      - "config.env"
+      - "config/**"
   workflow_dispatch:
     # GitHub allows at most 10 workflow_dispatch inputs, so these are the knobs
     # worth changing per-run. Everything else lives in the config file selected
@@ -88,8 +98,10 @@ on:
       publish_release: { required: false, default: false,        type: boolean }
 
 # Only one build per ref at a time; a newer run supersedes an older one.
+# `inputs.config` is empty on push, so fall back to the default profile to keep
+# the group stable and prevent a push build from racing a dispatch build.
 concurrency:
-  group: build-kernel-${{ github.ref }}-${{ inputs.config }}
+  group: build-kernel-${{ github.ref }}-${{ inputs.config || 'config.env' }}
   cancel-in-progress: true
 
 permissions:
@@ -97,7 +109,7 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ inputs.config }}
+    name: Build ${{ inputs.config || 'config.env' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     outputs:
@@ -109,7 +121,7 @@ jobs:
       susfs_version: ${{ steps.meta.outputs.susfs_version }}
     env:
       WORKSPACE: ${{ github.workspace }}/kernel_workspace
-      CONFIG_ENV: ${{ inputs.config }}
+      CONFIG_ENV: ${{ inputs.config || 'config.env' }}
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
       CCACHE_HARDLINK: "true"
@@ -236,7 +248,9 @@ jobs:
   release:
     name: Publish release
     needs: build
-    if: inputs.publish_release
+    # Always publish on push (the push is the trigger, there is no form to tick)
+    # and honour the checkbox on a manual dispatch.
+    if: github.event_name == 'push' || inputs.publish_release
     runs-on: ubuntu-latest
     permissions:
       contents: write
