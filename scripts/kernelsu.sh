@@ -254,7 +254,89 @@ ksu_install() {
 	# expose KSUN's static try_umount() to fs/susfs.c. Only done when the
 	# replacement variant does not declare SUSFS itself (SukiSU builtin does).
 	local ksu_kernel_dir="${ksu_dir}/kernel"
-	if [ -s "$susfs_menu" ] && ! grep -q 'config KSU_SUSFS' "${ksu_kernel_dir}/Kconfig" 2>/dev/null; then
+
+	# --- backslashxx: unity build, entirely different shim surface ----------
+	#
+	# This variant compiles the whole driver as ONE translation unit
+	# (obj-$(CONFIG_KSU) := kernelsu.o / kernelsu-y := ksu.o) and ships no
+	# Kbuild at all, so the "kernelsu-objs += agni_compat.o" injection used
+	# for KernelSU-Next below is a no-op here. Worse, every ksu_handle_* in
+	# feature/sucompat.c is declared through SUCOMPAT_HOOK_TYPE, which
+	# resolves to "static __always_inline int" whenever the syscall-table
+	# tampering or arm64 branch-link hook is enabled. The AGNi tree calls
+	# ksu_handle_faccessat() from fs/open.c under a bare #ifdef CONFIG_KSU,
+	# i.e. from a *different* translation unit, so the symbol has to be
+	# externally visible or the final vmlinux link fails with
+	# "undefined reference to ksu_handle_faccessat".
+	if [ "$name" = "backslashxx" ]; then
+		info "adapting ${name} to the tree's in-source KSU call sites"
+
+		local sucompat_c="${ksu_kernel_dir}/feature/sucompat.c"
+		if [ -f "$sucompat_c" ]; then
+			if grep -q '^#define SUCOMPAT_HOOK_TYPE static __always_inline int$' "$sucompat_c"; then
+				sed -i 's/^#define SUCOMPAT_HOOK_TYPE static __always_inline int$/#define SUCOMPAT_HOOK_TYPE int/' "$sucompat_c"
+			fi
+			grep -q '^#define SUCOMPAT_HOOK_TYPE int$' "$sucompat_c" \
+				|| die "could not turn SUCOMPAT_HOOK_TYPE into a linkable symbol in ${sucompat_c}"
+			ok "sucompat handlers exported for fs/open.c"
+		fi
+
+		if [ ! -f "${ksu_kernel_dir}/agni_compat.c" ]; then
+			cat > "${ksu_kernel_dir}/agni_compat.c" <<'AGNI_COMPAT_EOF'
+/*
+ * AGNi <-> backslashxx/KernelSU compatibility shims.
+ *
+ * The AGNi tree carries a built-in KernelSU integration (SukiSU Ultra), and a
+ * handful of its syscall hook call sites are guarded by a bare
+ * #ifdef CONFIG_KSU, so they stay compiled no matter which KSU variant is
+ * installed. backslashxx supplies almost everything those sites expect; this
+ * file adds the three symbols it genuinely does not export.
+ *
+ * Included from kernel/ksu.c (unity build) -- this tree has no Kbuild.
+ */
+#include <linux/fs.h>
+#include <linux/init.h>
+#include <linux/types.h>
+#include <linux/jump_label.h>
+
+/*
+ * drivers/tty/pty.c (bare CONFIG_KSU): devpts open notifier. What it feeds is
+ * SUSFS' devpts hiding, which is compiled out here, so a no-op is correct.
+ */
+int ksu_handle_devpts(struct inode *inode)
+{
+	return 0;
+}
+
+/*
+ * fs/read_write.c (bare CONFIG_KSU): init.rc injection gate. SukiSU defined
+ * this key in fs/susfs.c and enabled it from susfs_init(); with SUSFS off
+ * nothing would ever turn it on, so the branch stays cold and read() keeps
+ * its original fast path. backslashxx drives init.rc through its own
+ * ksud_vfs_read_key / ksu_handle_sys_read_fd pair, which is reached from the
+ * syscall-table hook installed by ksu_branch_link_patch_init().
+ */
+DEFINE_STATIC_KEY_FALSE(ksu_init_rc_hook_key_false);
+
+int ksu_handle_sys_read(unsigned int fd)
+{
+	ksu_handle_sys_read_fd(fd);
+	return 0;
+}
+AGNI_COMPAT_EOF
+		fi
+
+		# Unity build: there is no Kbuild to append to, so pull the shim into
+		# the single translation unit instead. Appending at the very end keeps
+		# every static helper it calls (ksu_handle_sys_read_fd) in scope.
+		if ! grep -q 'agni_compat\.c' "${ksu_kernel_dir}/ksu.c"; then
+			printf '\n/* AGNi call-site shims, appended by scripts/kernelsu.sh */\n#include "agni_compat.c"\n' \
+				>> "${ksu_kernel_dir}/ksu.c"
+		fi
+		grep -q 'agni_compat\.c' "${ksu_kernel_dir}/ksu.c" \
+			|| die "failed to inject agni_compat.c into kernel/ksu.c"
+		ok "agni_compat.c wired into the unity build"
+	elif [ -s "$susfs_menu" ] && ! grep -q 'config KSU_SUSFS' "${ksu_kernel_dir}/Kconfig" 2>/dev/null; then
 		info "bridging kernel-side SUSFS to ${name}"
 		printf '\n# SUSFS options rescued from the tree'"'"'s built-in KSU variant\n' \
 			>> "${ksu_kernel_dir}/Kconfig"
